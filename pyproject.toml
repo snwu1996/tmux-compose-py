@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "tmux-compose"
+version = "0.1.0"
+description = "Orchestrate the creation of tmux sessions with dependencies between commands in windows and panes."
+authors = ["shunongwu <shunongwu@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+packages = [{ include = "tmux_compose" }]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+PyYAML = "^6.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+
+[tool.poetry.scripts]
+tmux-compose = "tmux_compose.cli:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

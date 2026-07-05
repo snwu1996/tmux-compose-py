@@ -85,7 +85,8 @@ tmux-compose up --tui         # bring the project up, then browse it
 Opens a session browser: the left panel is a tree of every session, window
 and pane on the server (refreshed every 2s); click a pane (or select it with
 the arrow keys and Enter) and it is shown live on the right inside an
-embedded terminal. The right panel is a real attached tmux client — output
+embedded terminal. Clicking a window row shows the whole window — all of its
+panes in their tmux layout, as if you had attached to it. The right panel is a real attached tmux client — output
 streams in real time and anything you type goes into the pane.
 
 Keys: `Ctrl+T` switches focus between the tree and the terminal (while the
@@ -96,6 +97,10 @@ Notes:
   which window your other tmux clients are on. Selecting a pane does set the
   active pane within that window, and resizing the right panel can resize a
   window other clients are viewing (tmux shares window sizes).
+* The selected pane is zoomed (`resize-pane -Z`) so it fills the viewer even
+  when its window has other panes. Zoom is per-window in tmux, so clients
+  viewing the same window see it zoomed too; it is undone when you select
+  another pane or quit.
 * Mouse clicks are not forwarded into the pane; keyboard input only.
 
 ## Project

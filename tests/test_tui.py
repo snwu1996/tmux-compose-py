@@ -74,7 +74,7 @@ async def test_tree_lists_sessions_windows_and_panes(server):
         assert "alpha" in labels
         assert any(label.endswith("beta") for label in labels)
         # Two windows, one pane each.
-        pane_leaves = [n for n in _all_nodes(tree.root) if n.data]
+        pane_leaves = [n for n in _all_nodes(tree.root) if _is_pane(n)]
         assert len(pane_leaves) == 2
 
 
@@ -82,6 +82,14 @@ def _all_nodes(node):
     yield node
     for child in node.children:
         yield from _all_nodes(child)
+
+
+def _is_pane(node):
+    return node.data is not None and "pane_id" in node.data
+
+
+def _is_window(node):
+    return node.data is not None and "pane_id" not in node.data
 
 
 async def test_selecting_pane_shows_it_in_terminal(server):
@@ -92,7 +100,7 @@ async def test_selecting_pane_shows_it_in_terminal(server):
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         tree = app.query_one(Tree)
-        pane_node = next(n for n in _all_nodes(tree.root) if n.data)
+        pane_node = next(n for n in _all_nodes(tree.root) if _is_pane(n))
         tree.select_node(pane_node)
         await pilot.pause()
 
@@ -107,3 +115,75 @@ async def test_selecting_pane_shows_it_in_terminal(server):
     # The viewer session is cleaned up when the app exits.
     names = [s.session_name for s in server.sessions]
     assert not any(name.startswith(VIEWER_PREFIX) for name in names)
+
+
+def _zoomed_flag(window) -> bool:
+    window.refresh()
+    return window.window_zoomed_flag == "1"
+
+
+async def test_selected_pane_is_zoomed_and_unzoomed(server):
+    session = server.new_session(session_name="zoomy")
+    window = session.active_window
+    first = window.active_pane
+    window.split()  # second pane in the same window
+
+    app = TmuxComposeApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        tree = app.query_one(Tree)
+        first_node = next(
+            n for n in _all_nodes(tree.root)
+            if _is_pane(n) and n.data["pane_id"] == first.pane_id)
+        tree.select_node(first_node)
+        await pilot.pause()
+
+        assert await wait_for(pilot, lambda: _zoomed_flag(window))
+        window.refresh()
+        assert window.active_pane.pane_id == first.pane_id
+
+        # Selecting the sibling pane moves the zoom to it.
+        second = next(p for p in window.panes if p.pane_id != first.pane_id)
+        second_node = next(
+            n for n in _all_nodes(tree.root)
+            if _is_pane(n) and n.data["pane_id"] == second.pane_id)
+        tree.select_node(second_node)
+        await pilot.pause()
+        assert await wait_for(
+            pilot,
+            lambda: _zoomed_flag(window)
+            and window.active_pane.pane_id == second.pane_id)
+
+    # Zoom is undone when the app exits.
+    assert not _zoomed_flag(window)
+
+
+async def test_selecting_window_shows_all_panes_unzoomed(server):
+    session = server.new_session(session_name="windowed")
+    window = session.active_window
+    window.active_pane.send_keys("echo pane-one-marker", enter=True)
+    window.split().send_keys("echo pane-two-marker", enter=True)
+
+    app = TmuxComposeApp()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        tree = app.query_one(Tree)
+
+        # Zoom a pane first so we know window selection clears it.
+        first_node = next(n for n in _all_nodes(tree.root) if _is_pane(n))
+        tree.select_node(first_node)
+        await pilot.pause()
+        assert await wait_for(pilot, lambda: _zoomed_flag(window))
+
+        window_node = next(n for n in _all_nodes(tree.root) if _is_window(n))
+        tree.select_node(window_node)
+        await pilot.pause()
+        # Selecting a window must not collapse it.
+        assert window_node.is_expanded
+
+        terminal = app.query_one(TerminalEmulator)
+        assert await wait_for(
+            pilot,
+            lambda: "pane-one-marker" in terminal.screen_text
+            and "pane-two-marker" in terminal.screen_text)
+        assert not _zoomed_flag(window)

@@ -74,6 +74,9 @@ _KEY_BYTES = {
     "ctrl+space": b"\x00",
 }
 
+# Textual mouse button number -> SGR mouse button code.
+_MOUSE_BUTTONS = {1: 0, 2: 1, 3: 2}
+
 
 def _rich_color(value: str) -> str | None:
     """Translate a pyte color value to something Rich understands."""
@@ -263,3 +266,43 @@ class TerminalEmulator(Widget, can_focus=True):
         event.stop()
         event.prevent_default()
         os.write(self._master_fd, data)
+
+    def _report_mouse(self, event: events.MouseEvent, code: int,
+                      release: bool = False) -> None:
+        """Forward a mouse event to the pty as an SGR (1006) sequence; tmux
+        has ``mouse on`` in the viewer session and interprets these itself
+        (click selects the pane under the pointer, wheel scrolls, ...)."""
+        if self._master_fd is None:
+            return
+        if event.shift:
+            code += 4
+        if event.meta:
+            code += 8
+        if event.ctrl:
+            code += 16
+        final = "m" if release else "M"
+        seq = f"\x1b[<{code};{event.x + 1};{event.y + 1}{final}"
+        event.stop()
+        os.write(self._master_fd, seq.encode())
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        self.focus()
+        code = _MOUSE_BUTTONS.get(event.button)
+        if code is not None:
+            self._report_mouse(event, code)
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        code = _MOUSE_BUTTONS.get(event.button)
+        if code is not None:
+            self._report_mouse(event, code, release=True)
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        code = _MOUSE_BUTTONS.get(event.button)
+        if code is not None:  # drag with a button held
+            self._report_mouse(event, code + 32)
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self._report_mouse(event, 64)
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self._report_mouse(event, 65)

@@ -175,6 +175,9 @@ class TmuxComposeApp(App):
         tmux.server.cmd("set-option", "-t", viewer, "prefix", "None")
         tmux.server.cmd("set-option", "-t", viewer, "prefix2", "None")
         tmux.server.cmd("set-option", "-t", viewer, "status", "off")
+        # Let clicks in the viewer select panes (the terminal widget
+        # forwards mouse events as SGR escape sequences).
+        tmux.server.cmd("set-option", "-t", viewer, "mouse", "on")
         tmux.server.cmd("select-window",
                         "-t", f"{viewer}:{target['window_index']}")
         if "pane_id" in target:

@@ -101,7 +101,10 @@ Notes:
   when its window has other panes. Zoom is per-window in tmux, so clients
   viewing the same window see it zoomed too; it is undone when you select
   another pane or quit.
-* Mouse clicks are not forwarded into the pane; keyboard input only.
+* Mouse input is forwarded into the viewer: click a pane to make it active
+  and type into it, scroll to enter tmux copy-mode, and drag inside
+  mouse-aware apps. (Like selecting a pane in the tree, clicking changes the
+  window's active pane for all clients.)
 
 ## Project
 Example showing all options for the root node of the config file

@@ -217,14 +217,16 @@ class Project:
                 window.tmux_window = tmux.new_window(
                     session, window, self.get_dir(session, window, 0))
 
+                # A None entry (an empty "-" in the YAML) still creates a
+                # pane; it just gets no command.
                 for pane_index, pane in enumerate(window.panes):
-                    if pane is None:
-                        continue
                     directory = self.get_dir(session, window, pane_index)
                     if pane_index > 0:
-                        pane.pane = tmux.new_pane(window.tmux_window, directory)
+                        tmux_pane = tmux.new_pane(window.tmux_window, directory)
                     else:
-                        pane.pane = window.tmux_window.active_pane
+                        tmux_pane = window.tmux_window.active_pane
+                    if pane is not None:
+                        pane.pane = tmux_pane
 
                 tmux.select_layout(window.tmux_window, window.layout)
 

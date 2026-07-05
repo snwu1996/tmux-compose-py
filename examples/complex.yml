@@ -1,0 +1,84 @@
+# Complex: a multi-session microservice dev stack exercising every option.
+#
+#   infra session:  postgres + redis, each with a readycheck
+#   app session:    api waits for both databases, worker and frontend wait
+#                   for the api's health endpoint, plus a logs/scratch window
+#
+#   tmux-compose -f examples/complex.yml up
+#   tmux attach -t app
+#   tmux-compose -f examples/complex.yml restart   # reruns panes with a kill_cmd
+#   tmux-compose -f examples/complex.yml down
+
+dir: ~/dev/myapp                 # project-wide default working directory
+up_pre_cmd: mkdir -p /tmp/myapp && (date; echo up) >> /tmp/myapp/run.log
+up_post_cmd: (date; echo ready) >> /tmp/myapp/run.log
+down_pre_cmd: (date; echo stopping) >> /tmp/myapp/run.log
+down_post_cmd: rm -rf /tmp/myapp
+
+sessions:
+
+  # ---- Infrastructure --------------------------------------------------------
+  - name: infra
+    dir: ~/dev/myapp/infra       # session-level dir overrides the project dir
+    windows:
+
+      - name: postgres
+        panes:
+          - cmd: docker run --rm --name myapp-pg -e POSTGRES_PASSWORD=dev -p 5432:5432 postgres:16
+            kill_cmd: C-c
+            readycheck:
+              test: pg_isready -h localhost -p 5432
+              interval: 2s
+              retries: 15
+
+      - name: redis
+        panes:
+          - cmd: docker run --rm --name myapp-redis -p 6379:6379 redis:7
+            kill_cmd: C-c
+            readycheck:
+              test: redis-cli -h localhost ping
+              interval: 1s
+              retries: 15
+
+  # ---- Application -----------------------------------------------------------
+  - name: app
+    windows:
+
+      # The API starts only once both databases pass their readychecks,
+      # and is itself ready once its health endpoint answers.
+      - name: api
+        dir: ~/dev/myapp/api     # window-level dir overrides the session dir
+        layout: main-horizontal
+        panes:
+          - name: api-server
+            cmd: make run
+            kill_cmd: C-c
+            depends_on: ["postgres", "redis"]
+            readycheck:
+              test: curl -sf http://localhost:3000/health -o /dev/null
+              interval: 2s
+              retries: 30
+          - cmd: make test-watch
+            depends_on: ["api-server"]
+
+      # Background worker and frontend both wait for the API.
+      - name: services
+        layout: even-vertical
+        panes:
+          - cmd: python -m worker --queue default
+            dir: ~/dev/myapp/worker    # pane-level dir overrides everything
+            kill_cmd: C-c
+            depends_on: ["api-server"]
+          - cmd: npm run dev
+            dir: ~/dev/myapp/frontend
+            kill_cmd: C-c
+            depends_on: ["api-server"]
+
+      # Focused last: tail everything, plus an empty scratch shell.
+      - name: logs
+        focus: true
+        layout: even-horizontal
+        panes:
+          - cmd: tail -f /tmp/myapp/run.log
+            depends_on: ["services"]
+          -   # empty pane: plain shell for poking around

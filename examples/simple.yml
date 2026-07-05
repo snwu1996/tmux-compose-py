@@ -1,0 +1,13 @@
+# Simple: one session, one window, two panes.
+#
+#   tmux-compose -f examples/simple.yml up
+#   tmux attach -t simple
+#   tmux-compose -f examples/simple.yml down
+
+sessions:
+  - name: simple
+    windows:
+      - name: main
+        panes:
+          - cmd: top
+          -   # an empty pane: just a shell, no command

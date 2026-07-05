@@ -41,6 +41,7 @@ def test_up_creates_session_windows_and_panes(server, tmp_path):
                 "panes": [
                     {"cmd": f"echo one >> {log}"},
                     {"cmd": f"echo two >> {log}"},
+                    None,  # empty "-" entry: a pane with no command
                 ],
             }],
         }],
@@ -51,7 +52,7 @@ def test_up_creates_session_windows_and_panes(server, tmp_path):
     assert len(session.windows) == 1
     window = session.windows[0]
     assert window.window_name == "code"
-    assert len(window.panes) == 2
+    assert len(window.panes) == 3
 
     # Both pane commands were sent and executed.
     assert wait_for(lambda: log.exists() and

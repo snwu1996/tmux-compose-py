@@ -45,6 +45,11 @@ Teardown a tmux session:
 tmux-compose -f example.yml down
 ```
 
+Ready-to-run configs of increasing complexity live in [`examples/`](examples/):
+[`simple.yml`](examples/simple.yml) (one window, two panes),
+[`medium.yml`](examples/medium.yml) (readycheck + depends_on),
+[`complex.yml`](examples/complex.yml) (multi-session stack using every option).
+
 > This is a Python port (managed by [Poetry](https://python-poetry.org/)) of the
 > original Go [tmux-compose](https://github.com/kevinms/tmux-compose) by kevinms.
 > The YAML schema and behavior are a 1:1 match of the original.

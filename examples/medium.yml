@@ -1,0 +1,31 @@
+# Medium: a small web project. The client window waits (depends_on) until
+# the server's readycheck passes before its commands are run.
+#
+#   tmux-compose -f examples/medium.yml up
+#   tmux attach -t webapp
+#   tmux-compose -f examples/medium.yml down
+
+dir: ~/project          # default working directory for every pane
+sessions:
+  - name: webapp
+    windows:
+
+      # A static file server. The window counts as ready once curl succeeds.
+      - name: server
+        panes:
+          - cmd: python3 -m http.server 8000
+            kill_cmd: C-c          # lets "restart" stop and rerun this pane
+            readycheck:
+              test: curl -sf http://localhost:8000 -o /dev/null
+              interval: 1s
+              retries: 10
+
+      # Client tools, only started after the server answers.
+      - name: client
+        focus: true                # this window is selected after "up"
+        layout: even-horizontal
+        panes:
+          - cmd: curl -s http://localhost:8000/
+            depends_on: ["server"]
+          - cmd: watch -n5 'curl -so /dev/null -w "%{http_code}\n" http://localhost:8000'
+            depends_on: ["server"]

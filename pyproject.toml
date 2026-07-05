@@ -11,12 +11,18 @@ packages = [{ include = "tmux_compose" }]
 python = "^3.12"
 PyYAML = "^6.0"
 libtmux = "^0.61.0"
+textual = "^8.2.8"
+pyte = "^0.8.2"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"
+pytest-asyncio = "^1.4.0"
 
 [tool.poetry.scripts]
 tmux-compose = "tmux_compose.cli:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
 
 [build-system]
 requires = ["poetry-core"]

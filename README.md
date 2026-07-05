@@ -75,6 +75,29 @@ python -m tmux_compose -f example.yml up
 
 Only tested on Linux.
 
+## TUI
+
+```bash
+tmux-compose tui              # browse the tmux server
+tmux-compose up --tui         # bring the project up, then browse it
+```
+
+Opens a session browser: the left panel is a tree of every session, window
+and pane on the server (refreshed every 2s); click a pane (or select it with
+the arrow keys and Enter) and it is shown live on the right inside an
+embedded terminal. The right panel is a real attached tmux client — output
+streams in real time and anything you type goes into the pane.
+
+Keys: `Ctrl+T` switches focus between the tree and the terminal (while the
+terminal has focus, other keys are sent into the pane); `Ctrl+Q` quits.
+
+Notes:
+* Viewing uses a hidden *grouped* tmux session, so the browser never changes
+  which window your other tmux clients are on. Selecting a pane does set the
+  active pane within that window, and resizing the right panel can resize a
+  window other clients are viewing (tmux shares window sizes).
+* Mouse clicks are not forwarded into the pane; keyboard input only.
+
 ## Project
 Example showing all options for the root node of the config file
 ```yaml

@@ -93,6 +93,10 @@ class TerminalEmulator(Widget, can_focus=True):
     TerminalEmulator {
         width: 1fr;
         height: 1fr;
+        /* ansi-dark: pass the terminal's own default colors through
+           instead of the app theme's surface colors. */
+        color: ansi_default;
+        background: ansi_default;
     }
     TerminalEmulator:focus {
         border: none;

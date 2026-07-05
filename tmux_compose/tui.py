@@ -96,6 +96,10 @@ class TmuxComposeApp(App):
     ]
 
     def __init__(self, **kwargs):
+        # Pass ANSI colors through to the real terminal instead of
+        # converting them to RGB via Textual's built-in ANSI theme, so pane
+        # content is rendered with the user's own terminal palette.
+        kwargs.setdefault("ansi_color", True)
         super().__init__(**kwargs)
         self._tree_state: list = []
         self._zoomed_pane: str | None = None

@@ -1,20 +1,21 @@
-"""Data model, strict YAML loading and project actions.
-
-Faithful port of the structs and ``Project`` methods from the Go ``main.go``.
-"""
+"""Data model, strict YAML loading and project actions."""
 
 import re
+import time
 
 from . import tmux
-from .runner import Object, ReadyCheck, add_runner, run_all
+from .errors import TmuxComposeError
+from .runner import ReadyCheck, Runnable, run_all
 
 # --- Go-style duration parsing -------------------------------------------------
+# Durations in config files use Go's syntax (e.g. "3s", "1m30s") so existing
+# compose files keep working.
 
 _UNITS = {
     "ns": 1e-9,
     "us": 1e-6,
-    "µs": 1e-6,  # µs
-    "μs": 1e-6,  # μs (Greek mu, also accepted by Go)
+    "µs": 1e-6,  # micro sign
+    "μs": 1e-6,  # Greek mu, also accepted by Go
     "ms": 1e-3,
     "s": 1.0,
     "m": 60.0,
@@ -56,7 +57,7 @@ def parse_duration(value) -> float:
         pos = m.end()
 
     if not matched or pos != len(s):
-        tmux.fatal("time: invalid duration %r" % str(value))
+        raise TmuxComposeError(f"invalid duration: {value!r}")
     return sign * total
 
 
@@ -67,17 +68,17 @@ def _ensure_mapping(data, context: str) -> dict:
     if data is None:
         return {}
     if not isinstance(data, dict):
-        tmux.fatal("Expected a mapping for %s" % context)
+        raise TmuxComposeError(f"Expected a mapping for {context}")
     return data
 
 
 def _check_keys(data: dict, allowed: set, context: str) -> None:
     for key in data:
         if key not in allowed:
-            tmux.fatal("Unknown field %r in %s" % (key, context))
+            raise TmuxComposeError(f"Unknown field {key!r} in {context}")
 
 
-def _load_readycheck(data, obj: Object) -> None:
+def _load_readycheck(data, obj: Runnable) -> None:
     rc = _ensure_mapping(data, "readycheck")
     _check_keys(rc, {"test", "interval", "retries"}, "readycheck")
     obj.readycheck = ReadyCheck(
@@ -87,100 +88,85 @@ def _load_readycheck(data, obj: Object) -> None:
     )
 
 
-def _load_object_fields(data: dict, obj: Object) -> None:
-    """Populate the inlined Object fields (name/readycheck/depends_on)."""
+def _load_runnable_fields(data: dict, obj: Runnable) -> None:
+    """Populate the shared Runnable fields (name/readycheck/depends_on)."""
     obj.name = data.get("name", "") or ""
     if "readycheck" in data:
         _load_readycheck(data.get("readycheck"), obj)
-    depends = data.get("depends_on") or []
-    obj.depends_on = list(depends)
+    obj.depends_on = list(data.get("depends_on") or [])
 
 
 # --- Model classes -------------------------------------------------------------
 
 
-class Pane(Object):
+class Pane(Runnable):
     _ALLOWED = {"name", "readycheck", "depends_on", "dir", "focus", "cmd", "kill_cmd"}
 
     def __init__(self, data: dict):
         super().__init__()
         _check_keys(data, self._ALLOWED, "pane")
-        _load_object_fields(data, self)
+        _load_runnable_fields(data, self)
         self.dir = data.get("dir", "") or ""
         self.focus = bool(data.get("focus", False))
         self.cmd = data.get("cmd", "") or ""
         self.kill_cmd = data.get("kill_cmd", "") or ""
-        self.target = ""
+        self.pane = None  # libtmux.Pane, set when the pane is spawned/found
+        self.restarting = False  # only panes with a kill_cmd rerun on restart
 
     def run(self) -> None:
-        if tmux.restart and self.kill_cmd == "":
+        if self.restarting and not self.kill_cmd:
             return
-        tmux.send_line(self.target, self.cmd)
+        tmux.send_line(self.pane, self.cmd)
 
     def do_ready_check(self) -> None:
-        if self.readycheck.test == "":
+        rc = self.readycheck
+        if not rc.test:
             return
-        while True:
-            if tmux.run(self.readycheck.test) == 0:
-                break
-            if self.readycheck.retries <= 0:
-                tmux.fatal("Object test failed?!")
-            else:
-                self.readycheck.retries -= 1
-                _sleep(self.readycheck.interval)
+        retries = rc.retries
+        while tmux.run(rc.test) != 0:
+            if retries <= 0:
+                raise TmuxComposeError(f"readycheck failed: {rc.test}")
+            retries -= 1
+            time.sleep(rc.interval)
 
 
-class Window(Object):
+class Window(Runnable):
     _ALLOWED = {"name", "readycheck", "depends_on", "dir", "focus", "layout", "panes"}
 
     def __init__(self, data: dict):
         super().__init__()
         _check_keys(data, self._ALLOWED, "window")
-        _load_object_fields(data, self)
+        _load_runnable_fields(data, self)
         self.dir = data.get("dir", "") or ""
         self.focus = bool(data.get("focus", False))
         self.layout = data.get("layout", "") or ""
         self.panes = [None if p is None else Pane(_ensure_mapping(p, "pane"))
                       for p in (data.get("panes") or [])]
+        self.tmux_window = None  # libtmux.Window, set when the window is spawned
 
     def do_ready_check(self) -> None:
-        while True:
-            ready = True
-            for p in self.panes:
-                if p is None:
-                    continue
-                if not p.is_ready():
-                    ready = False
-                    _sleep(0.100)
-                    break
-            if ready:
-                return
+        for pane in self.panes:
+            if pane is not None:
+                pane.wait_until_ready()
 
 
-class Session(Object):
+class Session(Runnable):
     _ALLOWED = {"name", "readycheck", "depends_on", "dir", "windows"}
 
     def __init__(self, data: dict):
         super().__init__()
         _check_keys(data, self._ALLOWED, "session")
-        _load_object_fields(data, self)
+        _load_runnable_fields(data, self)
         self.dir = data.get("dir", "") or ""
         self.windows = [None if w is None else Window(_ensure_mapping(w, "window"))
                         for w in (data.get("windows") or [])]
         self.started = False
+        self.tmux_session = None  # libtmux.Session, set on first window spawn
 
     def do_ready_check(self) -> None:
-        while True:
-            ready = True
-            for w in self.windows:
-                if w is None:
-                    continue
-                if not w.is_ready():
-                    ready = False
-                    _sleep(0.100)
-                    break
-            if ready:
-                return
+        for window in self.windows:
+            if window is not None:
+                window.wait_until_ready()
 
 
 class Project:
@@ -198,110 +184,89 @@ class Project:
         self.sessions = [None if s is None else Session(_ensure_mapping(s, "session"))
                          for s in (data.get("sessions") or [])]
 
-    def get_dir(self, s: Session, w: Window, pane_index: int) -> str:
-        if pane_index > len(w.panes):
-            tmux.fatal("Pane index out of bounds?!")
+    def get_dir(self, session: Session, window: Window, pane_index: int) -> str:
+        pane_dir = ""
+        if pane_index < len(window.panes) and window.panes[pane_index] is not None:
+            pane_dir = window.panes[pane_index].dir
+        return pane_dir or window.dir or session.dir or self.dir or "."
 
-        if pane_index == 0 and len(w.panes) == 0:
-            # The window has no explicit panes.
-            return tmux.coalesce(w.dir, s.dir, self.dir, ".")
-
-        return tmux.coalesce(w.panes[pane_index].dir, w.dir, s.dir, self.dir, ".")
+    def _runners(self) -> list[Runnable]:
+        runners: list[Runnable] = []
+        for session in self.sessions:
+            if session is None:
+                continue
+            runners.append(session)
+            for window in session.windows:
+                if window is None:
+                    continue
+                runners.append(window)
+                runners.extend(p for p in window.panes if p is not None)
+        return runners
 
     def up(self) -> None:
-        if self.up_pre_cmd != "":
+        if self.up_pre_cmd:
             tmux.shell_in_dir(self.dir, self.up_pre_cmd)
 
         # Spawn all the sessions/windows/panes.
-        for s in self.sessions:
-            for wi, w in enumerate(s.windows):
-                if w is None:
+        for session in self.sessions:
+            if session is None:
+                continue
+            for window in session.windows:
+                if window is None:
                     continue
-                target = "%s:%d" % (s.name, wi)
-                dir = self.get_dir(s, w, 0)
+                window.tmux_window = tmux.new_window(
+                    session, window, self.get_dir(session, window, 0))
 
-                tmux.new_window(s, w, dir)
-
-                for pi, p in enumerate(w.panes):
-                    if p is None:
+                for pane_index, pane in enumerate(window.panes):
+                    if pane is None:
                         continue
-                    p.target = "%s:%d.%d" % (s.name, wi, pi)
-                    dir = self.get_dir(s, w, pi)
-                    if pi > 0:
-                        tmux.new_pane(target, dir)
+                    directory = self.get_dir(session, window, pane_index)
+                    if pane_index > 0:
+                        pane.pane = tmux.new_pane(window.tmux_window, directory)
+                    else:
+                        pane.pane = window.tmux_window.active_pane
 
-                tmux.select_layout(target, w.layout)
+                tmux.select_layout(window.tmux_window, window.layout)
 
         # Set which window has focus.
-        for s in self.sessions:
-            for wi, w in enumerate(s.windows):
-                if w is None:
-                    continue
-                if w.focus:
-                    target = "%s:%d" % (s.name, wi)
-                    tmux.select_window(target)
+        for session in self.sessions:
+            if session is None:
+                continue
+            for window in session.windows:
+                if window is not None and window.focus:
+                    tmux.select_window(window.tmux_window)
 
         # Run the commands concurrently.
-        for s in self.sessions:
-            if s is None:
-                continue
-            add_runner(s)
-            for w in s.windows:
-                if w is None:
-                    continue
-                add_runner(w)
-                for p in w.panes:
-                    if p is None:
-                        continue
-                    add_runner(p)
-        run_all()
+        run_all(self._runners())
 
-        if self.up_post_cmd != "":
+        if self.up_post_cmd:
             tmux.shell_in_dir(self.dir, self.up_post_cmd)
 
     def down(self) -> None:
-        if self.down_pre_cmd != "":
+        if self.down_pre_cmd:
             tmux.shell_in_dir(self.dir, self.down_pre_cmd)
 
-        for s in self.sessions:
-            tmux.kill_session(s.name)
+        for session in self.sessions:
+            if session is not None:
+                tmux.kill_session(session.name)
 
-        if self.down_post_cmd != "":
+        if self.down_post_cmd:
             tmux.shell_in_dir(self.dir, self.down_post_cmd)
 
     def restart(self) -> None:
-        for s in self.sessions:
-            for wi, w in enumerate(s.windows):
-                if w is None:
-                    continue
-                for pi, p in enumerate(w.panes):
-                    if p is None:
-                        continue
-                    p.target = "%s:%d.%d" % (s.name, wi, pi)
-
-                    if p.kill_cmd != "":
-                        tmux.send_line(p.target, p.kill_cmd)
-
-        # Used in each pane's run() to know we are performing a restart.
-        # Only commands with a kill_cmd will be restarted.
-        tmux.restart = True
-
-        # Run the commands concurrently.
-        for s in self.sessions:
-            if s is None:
+        for session in self.sessions:
+            if session is None:
                 continue
-            add_runner(s)
-            for w in s.windows:
-                if w is None:
+            for window_index, window in enumerate(session.windows):
+                if window is None:
                     continue
-                add_runner(w)
-                for p in w.panes:
-                    if p is None:
+                for pane_index, pane in enumerate(window.panes):
+                    if pane is None:
                         continue
-                    add_runner(p)
-        run_all()
+                    pane.pane = tmux.find_pane(session.name, window_index, pane_index)
+                    # Only panes with a kill_cmd are restarted.
+                    pane.restarting = True
+                    if pane.kill_cmd:
+                        tmux.send_line(pane.pane, pane.kill_cmd)
 
-
-def _sleep(seconds: float) -> None:
-    import time
-    time.sleep(seconds)
+        run_all(self._runners())

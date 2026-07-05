@@ -1,33 +1,24 @@
 import pytest
 
 from tmux_compose import runner
+from tmux_compose.errors import TmuxComposeError
 from tmux_compose.model import Pane, Project, Session, Window
-
-
-@pytest.fixture(autouse=True)
-def reset_registry():
-    runner.all_runners.clear()
-    runner.by_name.clear()
-    yield
-    runner.all_runners.clear()
-    runner.by_name.clear()
-
 
 # --- strict loading ------------------------------------------------------------
 
 
-def test_unknown_project_key_exits():
-    with pytest.raises(SystemExit):
+def test_unknown_project_key_errors():
+    with pytest.raises(TmuxComposeError):
         Project({"bogus": 1})
 
 
-def test_unknown_pane_key_exits():
-    with pytest.raises(SystemExit):
+def test_unknown_pane_key_errors():
+    with pytest.raises(TmuxComposeError):
         Pane({"command": "vim"})  # should be "cmd"
 
 
-def test_unknown_readycheck_key_exits():
-    with pytest.raises(SystemExit):
+def test_unknown_readycheck_key_errors():
+    with pytest.raises(TmuxComposeError):
         Pane({"cmd": "x", "readycheck": {"tset": "y"}})
 
 
@@ -108,22 +99,19 @@ def test_get_dir_no_panes_uses_window():
 # --- dependency validation -----------------------------------------------------
 
 
-def test_missing_dependency_exits():
-    p = Pane({"cmd": "x", "depends_on": ["nope"]})
-    runner.add_runner(p)
-    with pytest.raises(SystemExit):
-        runner.validate_dependencies()
+def test_missing_dependency_errors():
+    pane = Pane({"cmd": "x", "depends_on": ["nope"]})
+    with pytest.raises(TmuxComposeError, match="Dependency does not exist"):
+        runner.validate_dependencies([pane])
 
 
 def test_present_dependency_ok():
     dep = Window({"name": "db", "panes": [{"cmd": "start"}]})
     consumer = Pane({"cmd": "run", "depends_on": ["db"]})
-    runner.add_runner(dep)
-    runner.add_runner(consumer)
-    runner.validate_dependencies()  # should not raise
+    runner.validate_dependencies([dep, consumer])  # should not raise
 
 
-def test_duplicate_name_exits():
-    runner.add_runner(Session({"name": "dup"}))
-    with pytest.raises(SystemExit):
-        runner.add_runner(Session({"name": "dup"}))
+def test_duplicate_name_errors():
+    with pytest.raises(TmuxComposeError, match="Duplicate name"):
+        runner.validate_dependencies([Session({"name": "dup"}),
+                                      Session({"name": "dup"})])

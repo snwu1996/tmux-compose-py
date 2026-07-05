@@ -1,33 +1,36 @@
+"""Integration tests against a real (temporary) tmux server.
+
+The ``server`` fixture comes from libtmux's bundled pytest plugin and gives
+each test an isolated tmux server on its own socket.
+"""
+
+import time
+
 import pytest
 
-from tmux_compose import runner, tmux
+from tmux_compose import tmux
 from tmux_compose.model import Project
 
 
 @pytest.fixture(autouse=True)
-def reset_registry():
-    runner.all_runners.clear()
-    runner.by_name.clear()
-    tmux.restart = False
+def _use_test_server(server):
+    original = tmux.server
+    tmux.server = server
     yield
-    runner.all_runners.clear()
-    runner.by_name.clear()
-    tmux.restart = False
+    tmux.server = original
 
 
-@pytest.fixture
-def captured(monkeypatch):
-    calls = []
-
-    def fake_run(fmt, *args):
-        calls.append(fmt % args if args else fmt)
-        return 0
-
-    monkeypatch.setattr(tmux, "run", fake_run)
-    return calls
+def wait_for(predicate, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return False
 
 
-def test_up_emits_expected_commands(captured):
+def test_up_creates_session_windows_and_panes(server, tmp_path):
+    log = tmp_path / "out.log"
     project = Project({
         "sessions": [{
             "name": "demo",
@@ -35,54 +38,63 @@ def test_up_emits_expected_commands(captured):
                 "name": "code",
                 "layout": "main-vertical",
                 "focus": True,
-                "panes": [{"cmd": "vim"}, {"cmd": "top"}],
+                "panes": [
+                    {"cmd": f"echo one >> {log}"},
+                    {"cmd": f"echo two >> {log}"},
+                ],
             }],
         }],
     })
     project.up()
 
-    joined = "\n".join(captured)
-    assert 'tmux new-session -d -s demo -n "code" -c .' in captured
-    assert "tmux split-window -t demo:0 -c ." in captured
-    assert "tmux select-layout -t demo:0 main-vertical" in captured
-    assert "tmux select-window -t demo:0" in captured
-    # Both pane commands were sent.
-    assert "tmux send-keys -t demo:0.0 'vim'" in joined
-    assert "tmux send-keys -t demo:0.1 'top'" in joined
+    session = server.sessions.get(session_name="demo")
+    assert len(session.windows) == 1
+    window = session.windows[0]
+    assert window.window_name == "code"
+    assert len(window.panes) == 2
 
-    # Spawn phase happens before the split for pane 1.
-    assert captured.index('tmux new-session -d -s demo -n "code" -c .') < \
-        captured.index("tmux split-window -t demo:0 -c .")
+    # Both pane commands were sent and executed.
+    assert wait_for(lambda: log.exists() and
+                    sorted(log.read_text().split()) == ["one", "two"])
 
 
-def test_dependency_ordering(captured):
+def test_dependency_ordering(server, tmp_path):
     # pane "consumer" depends on window "db"; db's pane must run first.
+    log = tmp_path / "order.log"
+    db_ready = tmp_path / "db-ready"
     project = Project({
         "sessions": [{
             "name": "s",
             "windows": [
-                {"name": "db", "panes": [{"cmd": "start-db"}]},
-                {"panes": [{"cmd": "app", "depends_on": ["db"]}]},
+                {"name": "db", "panes": [{
+                    "cmd": f"echo db >> {log}; touch {db_ready}",
+                    "readycheck": {
+                        "test": f"test -f {db_ready}",
+                        "interval": "200ms",
+                        "retries": 50,
+                    },
+                }]},
+                {"panes": [{"cmd": f"echo app >> {log}",
+                            "depends_on": ["db"]}]},
             ],
         }],
     })
     project.up()
 
-    joined = "\n".join(captured)
-    db_idx = joined.index("start-db")
-    app_idx = joined.index("'app'")
-    assert db_idx < app_idx
+    assert wait_for(lambda: log.exists() and "app" in log.read_text())
+    lines = log.read_text().split()
+    assert lines.index("db") < lines.index("app")
 
 
-def test_down_kills_sessions(captured):
+def test_down_kills_sessions(server):
+    server.new_session(session_name="a")
+    server.new_session(session_name="b")
+
     project = Project({
-        "down_pre_cmd": "echo pre",
-        "down_post_cmd": "echo post",
-        "sessions": [{"name": "a"}, {"name": "b"}],
+        "sessions": [{"name": "a"}, {"name": "b"}, {"name": "never-existed"}],
     })
-    project.down()
+    project.down()  # killing a missing session must not raise
 
-    assert "cd .;echo pre" in captured
-    assert "tmux kill-session -t a" in captured
-    assert "tmux kill-session -t b" in captured
-    assert "cd .;echo post" in captured
+    names = [s.session_name for s in server.sessions]
+    assert "a" not in names
+    assert "b" not in names

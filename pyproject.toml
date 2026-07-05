@@ -10,6 +10,7 @@ packages = [{ include = "tmux_compose" }]
 [tool.poetry.dependencies]
 python = "^3.12"
 PyYAML = "^6.0"
+libtmux = "^0.61.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"

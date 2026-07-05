@@ -1,5 +1,6 @@
 import pytest
 
+from tmux_compose.errors import TmuxComposeError
 from tmux_compose.model import parse_duration
 
 
@@ -34,6 +35,6 @@ def test_integer_is_nanoseconds():
     assert parse_duration(1000000000) == pytest.approx(1.0)
 
 
-def test_invalid_exits(monkeypatch):
-    with pytest.raises(SystemExit):
+def test_invalid_errors():
+    with pytest.raises(TmuxComposeError):
         parse_duration("3 seconds")

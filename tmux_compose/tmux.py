@@ -1,105 +1,136 @@
-"""Shell execution and tmux command wrappers.
+"""Local shell helpers and libtmux-backed tmux operations.
 
-Faithful port of the helpers in the original Go ``main.go``. Shared mutable
-state (``gShellArgs``/``gRestart`` in the Go source) is kept here as module
-globals so behavior matches the original exactly.
+All tmux interaction goes through libtmux: sessions, windows and panes are
+created and driven via :class:`libtmux.Server` and the objects it returns.
+The local-shell helpers (``run``/``shell``) remain for readychecks and
+pre/post commands.
 """
 
 import subprocess
-import sys
+
+import libtmux
+from libtmux.exc import LibTmuxException
+
+from .errors import TmuxComposeError
+
+VALID_LAYOUTS = frozenset({
+    "even-horizontal",
+    "even-vertical",
+    "main-horizontal",
+    "main-vertical",
+    "titled",
+})
 
 # Split shell invocation, e.g. ["/bin/sh", "-c"]. Set by the CLI at startup.
 shell_args: list[str] = ["/bin/sh", "-c"]
 
-# Set to True during a restart so panes without a kill_cmd are skipped.
-restart: bool = False
+# The tmux server all operations go through. Tests replace this with a
+# temporary server from libtmux's pytest plugin.
+server = libtmux.Server()
 
 
-def fatal(message: object) -> None:
-    """Mirror Go's log.Fatal: print to stderr and exit with status 1."""
-    print(message, file=sys.stderr)
-    sys.exit(1)
+def run(cmd: str) -> int:
+    """Run a command through the configured shell, echoing it first.
 
-
-def run(fmt: str, *args: object) -> int:
-    """Run a command string through the configured shell.
-
-    Prints the command (as Go's ``fmt.Println(cmdStr)`` does), captures combined
-    stdout+stderr, and returns the process return code (0 on success).
+    Captures combined stdout+stderr and returns the exit code (0 on success).
     """
-    cmd_str = fmt % args if args else fmt
-    print(cmd_str)
+    print(cmd)
     proc = subprocess.run(
-        [shell_args[0], *shell_args[1:], cmd_str],
+        [*shell_args, cmd],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
     return proc.returncode
 
 
-def shell(fmt: str, *args: object) -> None:
-    """Run a command and abort the program if it fails (Go's ``shell``)."""
-    if run(fmt, *args) != 0:
-        cmd_str = fmt % args if args else fmt
-        fatal("command failed: " + cmd_str)
+def shell(cmd: str) -> None:
+    """Run a command and raise if it fails."""
+    if run(cmd) != 0:
+        raise TmuxComposeError(f"command failed: {cmd}")
 
 
-def shell_in_dir(dir: str, cmd: str) -> None:
-    shell("cd %s;%s", coalesce(dir, "."), cmd)
+def shell_in_dir(directory: str, cmd: str) -> None:
+    shell(f"cd {directory or '.'};{cmd}")
 
 
-def coalesce(*args: str) -> str:
-    """Return the first non-empty string, else ``""``."""
-    for s in args:
-        if s:
-            return s
-    return ""
+def new_window(session, window, directory: str) -> libtmux.Window:
+    """Create a window for ``session``, creating the session on first use."""
+    name = window.name or None
+    try:
+        if session.started:
+            return session.tmux_session.new_window(
+                window_name=name, start_directory=directory, attach=False)
+        session.tmux_session = server.new_session(
+            session_name=session.name, window_name=name,
+            start_directory=directory, attach=False)
+    except LibTmuxException as err:
+        raise TmuxComposeError(err) from err
+    session.started = True
+    return session.tmux_session.active_window
 
 
-def new_window(session, window, dir: str) -> None:
-    named_window = ""
-    if window.name:
-        named_window = '-n "%s"' % window.name
-    if session.started:
-        shell("tmux new-window -d -t %s %s -c %s", session.name, named_window, dir)
-    else:
-        shell("tmux new-session -d -s %s %s -c %s", session.name, named_window, dir)
-        session.started = True
+def new_pane(window: libtmux.Window, directory: str) -> libtmux.Pane:
+    try:
+        return window.split(start_directory=directory, attach=True)
+    except LibTmuxException as err:
+        raise TmuxComposeError(err) from err
 
 
-def new_pane(target: str, dir: str) -> None:
-    shell("tmux split-window -t %s -c %s", target, dir)
+def select_window(window: libtmux.Window) -> None:
+    try:
+        window.select()
+    except LibTmuxException as err:
+        raise TmuxComposeError(err) from err
 
 
-def select_window(target: str) -> None:
-    shell("tmux select-window -t %s", target)
-
-
-def select_layout(target: str, layout: str) -> None:
-    if layout == "":
+def select_layout(window: libtmux.Window, layout: str) -> None:
+    if not layout:
         return
-    if layout not in (
-        "even-horizontal",
-        "even-vertical",
-        "main-horizontal",
-        "main-vertical",
-        "titled",
-    ):
-        fatal("Bad layout: " + layout)
-    shell("tmux select-layout -t %s %s", target, layout)
+    if layout not in VALID_LAYOUTS:
+        raise TmuxComposeError(f"Bad layout: {layout}")
+    try:
+        window.select_layout(layout)
+    except LibTmuxException as err:
+        raise TmuxComposeError(err) from err
 
 
-def send_line(target: str, text: str) -> None:
-    if text == "":
+def send_line(pane: libtmux.Pane, text: str) -> None:
+    if not text:
         return
-    shell("tmux send-keys -t %s '%s'", target, text)
-    shell("tmux send-keys -R -t %s 'Enter'", target)
+    print(text)
+    try:
+        pane.send_keys(text, enter=True, suppress_history=False)
+    except LibTmuxException as err:
+        raise TmuxComposeError(err) from err
 
 
-def kill_session(session: str) -> None:
-    # Errors are intentionally ignored (Go used ``run`` here, not ``shell``).
-    run("tmux kill-session -t %s", session)
+def find_pane(session_name: str, window_index: int, pane_index: int) -> libtmux.Pane:
+    """Look up an existing pane by list position (not tmux index, so this
+    works regardless of the user's base-index setting)."""
+    session = server.sessions.get(session_name=session_name, default=None)
+    if session is None:
+        raise TmuxComposeError(f"Session does not exist: {session_name}")
+    try:
+        return session.windows[window_index].panes[pane_index]
+    except IndexError:
+        raise TmuxComposeError(
+            f"Pane does not exist: {session_name}:{window_index}.{pane_index}"
+        ) from None
 
 
-def set_environment(session: str, key: str, value: str) -> None:
-    shell("tmux set-environment -t %s %s %s", session, key, value)
+def kill_session(session_name: str) -> None:
+    # A missing session is not an error: "down" should be idempotent.
+    try:
+        server.kill_session(session_name)
+    except LibTmuxException:
+        pass
+
+
+def set_environment(session_name: str, key: str, value: str) -> None:
+    session = server.sessions.get(session_name=session_name, default=None)
+    if session is None:
+        raise TmuxComposeError(f"Session does not exist: {session_name}")
+    try:
+        session.set_environment(key, value)
+    except LibTmuxException as err:
+        raise TmuxComposeError(err) from err
